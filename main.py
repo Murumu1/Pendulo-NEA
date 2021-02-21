@@ -2,15 +2,13 @@ import pygame
 from pygame import Rect, Surface
 import pygame.gfxdraw
 
-import math
-from math import sin, pi, sqrt
-
-from dataclasses import dataclass
+import sympy
 import colorsys
 
 from typing import Optional, Callable
 
-# Initialises the pygame module
+from pygame.sprite import Group
+
 pygame.init()
 
 # Common colours
@@ -26,16 +24,19 @@ SCREEN_SIZE = SCREEN_WIDTH, SCREEN_HEIGHT, = (
 clock = pygame.time.Clock()
 FPS = 1200
 time = 0
-paused = False
 speed = 1
 
-font = pygame.font.Font("arial.ttf", 15)
+A, F, P, D, T = sympy.symbols("a, f, p, d, t")
+PENDULUM_EXPR = 50 * A * sympy.sin(T * F + P) * sympy.exp(-D * T)
+
+font = pygame.font.Font("arial-unicode-ms.ttf", 15)
 
 
 def create_text(text, colour, center):
     t = font.render(text, True, colour)
     t_r = t.get_rect(center=center)
     screen.blit(t, t_r)
+    return t_r
 
 
 def darken(colour: tuple, percent=0):
@@ -45,31 +46,12 @@ def darken(colour: tuple, percent=0):
     return tuple(map(lambda x: x * 255, list(colorsys.hsv_to_rgb(SCREEN_HEIGHT, s, v))))
 
 
-# Pendulum class Asin(tf + p)e^-dt
-@dataclass
-class Pendulum:
-    amplitude: float
-    frequency: float
-    phase: float
-    damping: float = 0
-
-    # Returns x, y relative to time (t)
-    def get_value(self, t) -> float:
-        return (
-            self.amplitude
-            * 100
-            * sin(t * self.frequency + self.phase)
-            * pow(math.e, -self.damping * t)
-        )
-
-
 SLIDER_MOVED = pygame.USEREVENT + 1
 SPRITE_HOVER = pygame.USEREVENT + 2
+TAB_CREATED = pygame.USEREVENT + 3
 
 all_sprites = pygame.sprite.Group()
 widget_group = pygame.sprite.Group()
-slider_group = pygame.sprite.Group()
-button_group = pygame.sprite.Group()
 
 
 class SpriteHandler(pygame.sprite.Sprite):
@@ -79,6 +61,8 @@ class SpriteHandler(pygame.sprite.Sprite):
         self.sprite_hover = pygame.event.Event(
             SPRITE_HOVER, name=self.__class__.__name__
         )
+
+        self.active = True
 
     def on_click(self, *args, **kwargs) -> None:
         pass
@@ -114,7 +98,6 @@ class Slider(SpriteHandler):
         self.slider_event = pygame.event.Event(SLIDER_MOVED, tag=tag, slider_id=index)
         self.value = self.default
 
-        slider_group.add(self)
         widget_group.add(self)
 
     def update(self, *args, **kwargs) -> None:
@@ -127,11 +110,13 @@ class Slider(SpriteHandler):
 
     # Moves the slider-ball to chosen position
     def on_drag(self, mouse_position, **kwargs):
-        if kwargs['show']:
+        if kwargs["show"]:
             new_x = mouse_position[0]
             if 250 > new_x > 50:
                 self.r.center = (new_x, self.r.centery)
                 self.value = ((self.max_val - self.min_val) / 300) * self.r.centerx
+
+            pygame.event.post(self.slider_event)
 
 
 class Button(SpriteHandler):
@@ -173,7 +158,6 @@ class Button(SpriteHandler):
 
         self.rect = self.image.get_rect(topleft=(dimensions[0], dimensions[1]))
 
-        button_group.add(self)
         widget_group.add(self)
 
     def update(self, *args, **kwargs) -> None:
@@ -241,57 +225,85 @@ class ToggleButton(Button):
         self.toggled = not self.toggled
 
 
-class Tab(SpriteHandler):
-    no_of_tabs = 0
+tabs = pygame.sprite.Group()
 
+
+class Tab(SpriteHandler):
     def __init__(self):
         super(Tab, self).__init__()
 
-        Tab.no_of_tabs += 1
-        self.sliders = slider_group
-        self.widget_rects = [
-            slider_sprite.rect for slider_sprite in self.sliders.sprites()
+        self.sliders_x = pygame.sprite.Group(
+            Slider("amplitude x", 1, 0.1, 5, 1),
+            Slider("frequency x", 2, 1, 10, 3),
+            Slider("phase x", 3, 0, round(sympy.pi * 2, 3), sympy.pi / 2),
+            Slider("damping x", 4, 0, 2, 0),
+        )
+
+        self.sliders_y = pygame.sprite.Group(
+            Slider("amplitude y", 5, 0.1, 5, 1),
+            Slider("frequency y", 6, 1, 10, 2),
+            Slider("phase y", 7, 0, round(sympy.pi * 2, 3), 0),
+            Slider("damping y", 8, 0, 2, 0),
+        )
+
+        self.all_sliders = pygame.sprite.Group(
+            *self.sliders_x.sprites(), *self.sliders_y.sprites()
+        )
+
+        self.index = len(tabs) + 1
+        self.slider_rects = [
+            slider_sprite.rect for slider_sprite in self.all_sliders.sprites()
         ]
-        self.rect = self.widget_rects[0].unionall(self.widget_rects)
+        self.rect = self.slider_rects[0].unionall(self.slider_rects)
         self.image = Surface(self.rect.size)
 
-        # fix this garbo make an actual panel, this only makes a single tab
-        self.panel = Button(str(Tab.no_of_tabs), (Tab.no_of_tabs * 50, 275, 50, 50), self.update_buffer, WHITE)
-        button_group.remove(self.panel)
-        widget_group.remove(self.panel)
+        self.panel = ToggleButton(
+            (str(self.index), str(self.index)),
+            (self.index * 50, 275, 50, 50),
+            self.update_buffer,
+            (WHITE, (255, 0, 255)),
+        )
 
     def update_buffer(self):
+        print(tabs.sprites())
+        for tab in tabs.sprites():
+            if tab != self:
+                tab.panel.toggled = False
+
         pygame.gfxdraw.rectangle(screen, self.rect, WHITE)
-        self.sliders.update()
 
     def update(self, *args, **kwargs) -> None:
-        self.panel.update()
+        for slider in self.all_sliders.sprites():
+            slider.active = self.panel.toggled and menu_btn.toggled
 
 
 class Menu(SpriteHandler):
     def __init__(self):
         super(Menu, self).__init__()
-        # generalise this or smth
-        self.sliders = slider_group
-        self.widget_rects = [
-            slider_sprite.rect for slider_sprite in self.sliders.sprites()
-        ]
-        self.rect = self.widget_rects[0].unionall(self.widget_rects)
+
+        self.tab_button = Button(
+            "+",
+            (0, 275, 50, 50),
+            self.create_tab,
+            WHITE,
+        )
+
+        self.rect = self.tab_button.rect.unionall(
+            [tab.panel.rect for tab in tabs.sprites()]
+        )
         self.image = Surface(self.rect.size)
 
-        self.tabs = pygame.sprite.Group(Tab())
-        self.tab_button = Button("+", (self.rect.left + 50, self.rect.top - 50, 50, 50), self.create_tab, WHITE)
-        button_group.remove(self.tab_button)
-        widget_group.remove(self.tab_button)
-
-        print(self.rect)
+        self.tab_created_event = pygame.event.Event(TAB_CREATED)
+        self.create_tab()
 
     def create_tab(self):
-        self.tabs.add(Tab())
+        if len(tabs) == 3:
+            return
 
-    def update(self, *args, **kwargs) -> None:
-        self.tab_button.update()
-        self.tabs.update()
+        tabs.add(Tab())
+        self.rect.width += 50
+        self.image = Surface(self.rect.size)
+        pygame.event.post(self.tab_created_event)
 
 
 class Canvas(SpriteHandler):
@@ -307,45 +319,75 @@ class Canvas(SpriteHandler):
         self.image = Surface((500, 500))
         self.rect = self.image.get_rect(center=(SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2))
 
+        self.x_expr = 0
+        self.y_expr = 0
+        self.x = sympy.Function("x")
+        self.y = sympy.Function("y")
+
+        self.last_point = ()
+
+        self.SUBS_CONSTS = [A, F, P, D]
+        self.update_coords()
+
+    def update_coords(self):
+        self.x_expr = 0
+        self.y_expr = 0
+
+        for tab in tabs.sprites():
+            x_values = [sl_x.value for sl_x in tab.sliders_x.sprites()]
+            self.x_expr += PENDULUM_EXPR.xreplace(dict(zip(self.SUBS_CONSTS, x_values)))
+
+            y_values = [sl_y.value for sl_y in tab.sliders_y.sprites()]
+            self.y_expr += PENDULUM_EXPR.xreplace(dict(zip(self.SUBS_CONSTS, y_values)))
+
+        self.x = sympy.lambdify(T, self.x_expr)
+        self.y = sympy.lambdify(T, self.y_expr)
+
+    def coords_at_time(self, t):
+        return self.x(t), self.y(t)
+
     def update(self, *args, **kwargs) -> None:
-        global time, last_point, x, y
 
-        # Draws each point of the Harmonograph
-        if SLIDER_MOVED in (ev.type for ev in pygame.event.get()):
-            x = Pendulum(
-                sliders[0].value, sliders[1].value, sliders[2].value, sliders[3].value
-            )
-            y = Pendulum(
-                sliders[4].value, sliders[5].value, sliders[6].value, sliders[7].value
-            )
+        fill_rect = Rect(0, 0, 740, 51)
+        fill_rect.center = (SCREEN_WIDTH / 2, 38)
+        screen.fill(BLACK, fill_rect)
 
-        curr_values = curr_x, curr_y = x.get_value(time), y.get_value(time)
-        if last_point:
-            x1, y1 = tp(last_point)
-            x2, y2 = tp(curr_values)
-            pygame.gfxdraw.line(screen, x1, y1, x2, y2, (0, 255, 0))
-        next_values = next_x, next_y = x.get_value(time + speed / FPS), y.get_value(
-            time + speed / FPS
+        create_text(
+            "x(t) = {}".format(sympy.pretty(self.x_expr / 50).replace("⋅", "")),
+            WHITE,
+            (SCREEN_WIDTH / 2, 25),
         )
-        last_point = next_values
+        create_text(
+            "y(t) = {}".format(sympy.pretty(self.y_expr / 50).replace("⋅", "")),
+            WHITE,
+            (SCREEN_WIDTH / 2, 50),
+        )
 
-        point_distance = sqrt(((curr_x - next_x) ** 2) + ((curr_y - next_y) ** 2))
+        curr_point = curr_x, curr_y = self.coords_at_time(time)
+
+        if self.last_point:
+            x1, y1 = tp(self.last_point)
+            x2, y2 = tp(curr_point)
+            pygame.gfxdraw.line(screen, x1, y1, x2, y2, (0, 255, 0))
+
+        next_values = next_x, next_y = self.coords_at_time(time + speed / FPS)
+        self.last_point = next_values
+
+        point_distance = sympy.sqrt(((curr_x - next_x) ** 2) + ((curr_y - next_y) ** 2))
 
         step = 1
-        points = [curr_values, next_values]
+        points = [curr_point, next_values]
 
         while point_distance > 1:
             next_stamp = speed / FPS / (2 ** step)
-            general_point = x.get_value(time + next_stamp), y.get_value(
-                time + next_stamp
-            )
+            general_point = self.coords_at_time(time + next_stamp)
 
             for s in range(1, 2 ** step, 2):
                 varying_point = time + s * next_stamp
-                vertex = x.get_value(varying_point), y.get_value(varying_point)
+                vertex = self.coords_at_time(varying_point)
                 points.insert(1, vertex)
 
-            point_distance = sqrt(
+            point_distance = sympy.sqrt(
                 ((curr_x - general_point[0]) ** 2) + ((curr_y - general_point[1]) ** 2)
             )
             step += 1
@@ -357,31 +399,6 @@ class Canvas(SpriteHandler):
         for p in points:
             p_x, p_y = tp(p)
             pygame.gfxdraw.pixel(screen, p_x, p_y, (0, 255, 0))
-
-        time += speed / FPS
-
-
-slider_info = {
-    "amplitude x": (0.1, 5, 1),
-    "frequency x": (1, 10, 3),
-    "phase x": (0, round(pi * 2, 3), pi / 2),
-    "damping x": (0, 2, 0),
-    "amplitude y": (0.1, 5, 1),
-    "frequency y": (1, 10, 2),
-    "phase y": (0, round(pi * 2, 3), 0),
-    "damping y": (0, 2, 0),
-}
-
-# List of sliders
-sliders = []
-keys = list(slider_info.keys())
-
-# Creates a set of x names and y names for the sliders
-# Also gives each slider an index number (to identify and position)
-for i in range(0, 8):
-    key = keys[i]
-    value = slider_info[keys[i]]
-    sliders.append(Slider(key, i + 1, *value))
 
 
 menu = Menu()
@@ -430,16 +447,18 @@ pause_btn = ToggleButton(
     reverse=True,
 )
 
-
-def temp():
-    pass
-
-
-last_point = ()
 running = True
 while running:
-    screen.fill((0, 0, 0), (menu.rect.left, menu.rect.top - 50, menu.rect.width, menu.rect.height + 50))
+    screen.fill(
+        (0, 0, 0),
+        (menu.rect.left, menu.rect.top - 50, menu.rect.width, menu.rect.height + 50),
+    )
+    screen.fill(BLACK, tabs.sprites()[0].rect)
     mouse_pos = pygame.mouse.get_pos()
+
+    menu.tab_button.active = menu_btn.toggled
+    for tab in tabs.sprites():
+        tab.panel.active = menu_btn.toggled
 
     # Event handler
     for event in pygame.event.get():
@@ -447,24 +466,25 @@ while running:
             running = False
         if event.type == pygame.MOUSEBUTTONDOWN:
             for widget in widget_group.sprites():
-                if widget.rect.collidepoint(mouse_pos):
+                if widget.rect.collidepoint(mouse_pos) and widget.active:
                     widget.on_click(mouse_pos)
+        if event.type == SLIDER_MOVED or TAB_CREATED:
+            canvas.update_coords()
 
     if pygame.mouse.get_pressed(3)[0]:
         for widget in widget_group.sprites():
-            if widget.rect.collidepoint(mouse_pos):
+            if widget.rect.collidepoint(mouse_pos) and widget.active:
                 widget.on_drag(mouse_pos, show=menu_btn.toggled)
 
-    # menu_btn.draw()
-    x = Pendulum(sliders[0].value, sliders[1].value, sliders[2].value, sliders[3].value)
-    y = Pendulum(sliders[4].value, sliders[5].value, sliders[6].value, sliders[7].value)
+    for widget in widget_group.sprites():
+        if widget.active:
+            widget.update()
 
-    button_group.update()
+    tabs.update()
 
-    # Draws each slider
-
+    if not pause_btn.toggled:
+        time += speed / FPS
     clock.tick(FPS)
-
-    pygame.display.flip()  # Updates the display
+    pygame.display.flip()
 
 pygame.quit()
