@@ -4,6 +4,7 @@ from collections import namedtuple
 from tkinter import colorchooser, Tk
 from typing import Optional, Callable
 
+import dataset
 import pygame
 import pygame.gfxdraw
 import sympy
@@ -12,6 +13,8 @@ from pygame.sprite import Group, Sprite
 
 pygame.init()  # Initialises Pygame
 Tk().withdraw()  # Stops the tkinter window from opening
+
+db = dataset.connect("sqlite:///configurations.db")
 
 # Common colours
 BLACK = 0, 0, 0
@@ -35,7 +38,7 @@ font = pygame.font.Font("arial-unicode-ms.ttf", 15)
 curve_colour = (0, 255, 0)
 
 
-def create_text(text: str, colour: tuple, center: tuple, display=True):
+def create_text(text: str, colour: tuple, center: tuple, display=True, topleft: tuple = ()):
     """
     Creates text and displays it at the given center
 
@@ -43,11 +46,14 @@ def create_text(text: str, colour: tuple, center: tuple, display=True):
     :param colour: r, g, b colours
     :param center: location to display text
     :param display: do screen.blit immediately
+    :param topleft: anchor topleft instead
     :return: the text Rect object
     """
 
     t = font.render(text, True, colour)
     t_r = t.get_rect(center=center)
+    if topleft:
+        t_r = t.get_rect(topleft=topleft)
     if display:
         SCREEN.blit(t, t_r)
     return t, t_r
@@ -349,32 +355,32 @@ class Tab(ModifiedSprite):
 
         self.sliders_x = pygame.sprite.Group(
             Slider(
-                "amplitude x",
-                1,
+                "Amplitude x",
+                8,
                 0.1,
                 5,
                 1,
                 tooltip="Changes the size of the curve in the x-direction.",
             ),
             Slider(
-                "frequency x",
-                2,
+                "Frequency x",
+                7,
                 1,
                 10,
                 3,
                 tooltip="Changes the amount of oscillations the pendulum makes.",
             ),
             Slider(
-                "phase x",
-                3,
+                "Phase x",
+                6,
                 0,
                 round(sympy.pi * 2, 3),
                 sympy.pi / 2,
                 tooltip="Delays the start of the pendulum by the phase angle.",
             ),
             Slider(
-                "damping x",
-                4,
+                "Damping x",
+                5,
                 0,
                 0.01,
                 0.005,
@@ -384,32 +390,32 @@ class Tab(ModifiedSprite):
 
         self.sliders_y = pygame.sprite.Group(
             Slider(
-                "amplitude y",
-                5,
+                "Amplitude y",
+                4,
                 0.1,
                 5,
                 1,
                 tooltip="Changes the size of the curve in the y-direction.",
             ),
             Slider(
-                "frequency y",
-                6,
+                "Frequency y",
+                3,
                 1,
                 10,
                 2,
                 tooltip="Changes the amount of oscillations the pendulum makes.",
             ),
             Slider(
-                "phase y",
-                7,
+                "Phase y",
+                2,
                 0,
                 round(sympy.pi * 2, 3),
                 0,
                 tooltip="Delays the start of the pendulum by the phase angle.",
             ),
             Slider(
-                "damping y",
-                8,
+                "Damping y",
+                1,
                 0,
                 0.01,
                 0.005,
@@ -422,6 +428,15 @@ class Tab(ModifiedSprite):
         )
 
         self.index = len(tabs) + 1
+
+        self.table: dataset.Table = db[f"tab{self.index}"]
+
+        db.begin()
+        slider: Slider
+        for slider in self.all_sliders:
+            self.table.create_column(slider.tag, db.types.float)
+        db.commit()
+
         self.slider_rects = [
             slider_sprite.rect for slider_sprite in self.all_sliders.sprites()
         ]
@@ -432,7 +447,7 @@ class Tab(ModifiedSprite):
             (str(self.index), str(self.index)),
             (self.index * 50, 275, 50, 50),
             self.update_buffer,
-            (WHITE, (255, 0, 255)),
+            (WHITE, (180, 180, 180)),
         )
 
     def update_buffer(self):
@@ -448,13 +463,13 @@ class Tab(ModifiedSprite):
             slider.active = self.panel.toggled and menu_btn.toggled
 
 
-class Menu(ModifiedSprite):
+class TabMenu(ModifiedSprite):
     def __init__(self, tooltip: Optional[str] = None):
         """
         The tab manager
         """
 
-        super(Menu, self).__init__(tooltip)
+        super(TabMenu, self).__init__(tooltip)
 
         self.tab_button = Button(
             "+",
@@ -481,6 +496,78 @@ class Menu(ModifiedSprite):
         self.image = Surface(self.rect.size)
         pygame.event.post(self.tab_created_event)
 
+    def remove_tab(self):
+        if len(tabs) == 1:
+            return
+
+        tabs.remove(tabs.sprites()[len(tabs.sprites()) - 1])
+        self.rect.width -= 50
+        self.image = Surface(self.rect.size)
+        pygame.event.post(self.tab_created_event)
+
+
+class LoadMenu(ModifiedSprite):
+    def __init__(self):
+        super(LoadMenu, self).__init__()
+
+        self.image = Surface((370, 600))
+        self.rect = self.image.get_rect(topleft=(1020, 200))
+
+        self.entries = []
+        self.update_entries()
+
+        self.cursor = 0
+
+        self.next_button = Button("Next", (1240, 720, 60, 60), self.increment_cursor, (100, 200, 255))
+        self.next_button.active = False
+
+        self.import_button = Button("Import", (1310, 720, 60, 60), self.import_configurations, (255, 200, 100))
+        self.import_button.active = False
+
+    def increment_cursor(self):
+        self.cursor += 1
+        if self.cursor > len(self.entries) - 1:
+            self.cursor = 0
+
+    def update_entries(self):
+        self.entries = []
+        tab: Tab
+        for i in range(len(tabs.sprites()[0].table)):
+            current_id = i + 1
+            current_entry = []
+            for table in db.tables:
+                current_entry.append(db.load_table(table).find_one(id=current_id))
+            self.entries.append(current_entry)
+
+    def import_configurations(self):
+        while len(tabs.sprites()) != len(self.entries[self.cursor]):
+            if len(tabs.sprites()) > len(self.entries[self.cursor]):
+                menu.remove_tab()
+            else:
+                menu.create_tab()
+
+        for index, entry in enumerate(self.entries[self.cursor]):
+            current_tab = tabs.sprites()[index]
+            for i, slider in enumerate(current_tab.all_sliders.sprites()):
+                slider.value = [j for j in entry.values()][i + 1]
+        canvas.update_coords()
+
+    def update(self, *args, **kwargs) -> None:
+        pygame.gfxdraw.rectangle(SCREEN, self.rect, WHITE)
+
+        print_index = 0
+        create_text(f"ID: {self.cursor + 1}", WHITE, (0, 0), topleft=(1040, 220))
+        for index, entry in enumerate(self.entries[self.cursor]):
+            if not entry:
+                continue
+            for key, value in entry.items():
+                print_index += 1
+                if key == "id":
+                    continue
+                else:
+                    create_text(f"TAB {index + 1} {key}: {round(value, 3)}", WHITE, (0, 0),
+                                topleft=(1040, 220 + (20 * print_index)))
+
 
 def temp():
     pass
@@ -490,7 +577,7 @@ auto_clear_btn = ToggleButton(
     ("Auto Clear OFF", "Auto Clear ON"),
     (10, 80, 130, 60),
     temp,
-    ((255, 0, 0), (0, 255, 0)),
+    ((255, 0, 0), (124, 255, 0)),
     tooltip="Automatically clears the canvas when changes are made",
 )
 
@@ -547,12 +634,12 @@ class Canvas(ModifiedSprite):
         create_text(
             f"x(t) = {pretty_print(str(round_expr(self.x_expr / 50)))}",
             WHITE,
-            (SCREEN_WIDTH / 2, 25),
+            (SCREEN_WIDTH / 2, 160),
         )
         create_text(
             f"y(t) = {pretty_print(str(round_expr(self.y_expr / 50)))}",
             WHITE,
-            (SCREEN_WIDTH / 2, 50),
+            (SCREEN_WIDTH / 2, 185),
         )
 
         create_text(
@@ -609,8 +696,9 @@ class Canvas(ModifiedSprite):
             pygame.gfxdraw.pixel(SCREEN, p_x, p_y, curve_colour)
 
 
-menu = Menu(tooltip="This is the panel for the sliders")
+menu = TabMenu(tooltip="This is the panel for the sliders")
 canvas = Canvas()
+load_menu = LoadMenu()
 
 
 def to_pygame(coordinate):
@@ -633,7 +721,7 @@ def fill_black():
 
 def inc_speed():
     global speed
-    if speed == 128:
+    if speed == 512:
         speed = 1
     else:
         speed *= 2
@@ -652,15 +740,49 @@ def choose_colour():
     canvas.update_coords()
 
 
+def save():
+    tab: Tab
+    slider: Slider
+
+    values = []
+    tests = []
+
+    next_id = len(tabs.sprites()[0].table) + 1
+
+    for tab in tabs.sprites():
+        values_dict = {}
+        for slider in tab.all_sliders.sprites():
+            values_dict[f"{slider.tag}"] = slider.value
+        tests.append(bool(tab.table.find_one(**values_dict)))
+        values_dict["id"] = next_id
+        values.append(values_dict)
+
+    if not all(tests):
+        db.begin()
+        for index, tab in enumerate(tabs.sprites()):
+            tab.table.insert(values[index])
+        db.commit()
+        load_menu.update_entries()
+
+
 quit_btn = Button(
     "Quit", (80, 10, 60, 60), pygame.quit, (255, 0, 0), tooltip="Click to exit"
+)
+
+pause_btn = ToggleButton(
+    ("Pause", "Paused"),
+    (150, 10, 60, 60),
+    canvas.update,
+    ((255, 69, 0), (255, 0, 0)),
+    reverse=True,
+    tooltip="Pauses/Unpauses the system",
 )
 
 cls_btn = Button(
     "Clear",
     (220, 10, 60, 60),
     fill_black,
-    (0, 0, 255),
+    (255, 165, 0),
     toggle_periodicity=1,
     tooltip="Clears the canvas",
 )
@@ -682,20 +804,11 @@ menu_btn = ToggleButton(
     tooltip="Opens the slider menu, where you can change the properties of the harmonograph",
 )
 
-pause_btn = ToggleButton(
-    ("Pause", "Paused"),
-    (150, 10, 60, 60),
-    canvas.update,
-    ((0, 255, 0), (255, 0, 0)),
-    reverse=True,
-    tooltip="Pauses/Unpauses the system",
-)
-
 reset_time_btn = Button(
     "Reset time to 0",
     (150, 80, 130, 60),
     reset_time,
-    (255, 0, 255),
+    (0, 255, 0),
     tooltip="Resets the time to 0, used for investigating damping",
 )
 
@@ -703,16 +816,32 @@ colour_button = Button(
     "Colour",
     (290, 80, 60, 60),
     choose_colour,
-    (200, 255, 150),
+    (0, 0, 255),
     tooltip="Changes the colour of the pen",
 )
 
 tooltip_button = ToggleButton(
-    ("Enable tooltips", "Disable tooltips"),
+    ("Disable tooltips", "Enable tooltips"),
     (360, 10, 130, 60),
     temp,
     ((210, 180, 255), (255, 180, 210)),
     tooltip="Enable/Disable tooltips",
+)
+
+save_button = Button(
+    "Save",
+    (360, 80, 60, 60),
+    save,
+    (50, 0, 255),
+    tooltip="Save the current configurations",
+)
+
+load_button = ToggleButton(
+    ("Load", "Close"),
+    (430, 80, 60, 60),
+    load_menu.update,
+    ((100, 0, 255), (255, 0, 255)),
+    tooltip="Load configurations",
 )
 
 running = True
@@ -733,6 +862,10 @@ while running:
     menu.tab_button.active = menu_btn.toggled
     for tab in tabs.sprites():
         tab.panel.active = menu_btn.toggled
+
+    load_menu.active = load_button.toggled
+    load_menu.next_button.active = load_button.toggled
+    load_menu.import_button.active = load_button.toggled
 
     # Event handler
     for event in pygame.event.get():
