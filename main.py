@@ -1,5 +1,6 @@
 import colorsys
 import math
+import sys
 from collections import namedtuple
 from tkinter import colorchooser, Tk
 from typing import Optional, Callable
@@ -38,7 +39,9 @@ font = pygame.font.Font("arial-unicode-ms.ttf", 15)
 curve_colour = (0, 255, 0)
 
 
-def create_text(text: str, colour: tuple, center: tuple, display=True, topleft: tuple = ()):
+def create_text(
+        text: str, colour: tuple, center: tuple, display=True, topleft: tuple = ()
+):
     """
     Creates text and displays it at the given center
 
@@ -99,7 +102,7 @@ def round_expr(expr):
     new_expr = expr
     for node in sympy.preorder_traversal(expr):
         if isinstance(node, sympy.Float):
-            new_expr = new_expr.subs(node, round(node, 3))
+            new_expr = new_expr.xreplace({node: round(node, 3)})
     return new_expr
 
 
@@ -148,15 +151,18 @@ class ModifiedSprite(Sprite):
                 tooltip_surf, tooltip_rect = create_text(
                     group,
                     BLACK,
-                    (mouse_position[0] + 100, mouse_position[1] + 10 + (15 * i)),
+                    (0, 0),
                     False,
+                    topleft=(mouse_position[0] + 20, mouse_position[1] + 10 + (15 * i)),
                 )
                 objects.append((tooltip_surf, tooltip_rect))
 
             box = objects[0][1].unionall([i[1] for i in objects])
             if box.colliderect(canvas.rect):
                 return
-            pygame.gfxdraw.box(SCREEN, box, WHITE)
+            padding = 5
+            pygame.gfxdraw.box(SCREEN, box.inflate(padding, padding), WHITE)
+            pygame.gfxdraw.rectangle(SCREEN, box.inflate(padding, padding), BLACK)
             for obj in objects:
                 SCREEN.blit(*obj)
 
@@ -192,7 +198,7 @@ class Slider(ModifiedSprite):
 
         self.r = Rect((0, 0), (30, 30))
         self.r.center = (
-            ((self.default * 300) / (self.max_val - self.min_val)) + 50,
+            ((self.default * 250) // (self.max_val - self.min_val)) + 50,
             SCREEN_HEIGHT - (self.i * 70) + 30,
         )
 
@@ -223,10 +229,13 @@ class Slider(ModifiedSprite):
         if kwargs["show"]:
             new_x = mouse_position[0]
             if 250 > new_x > 50:
-                self.r.center = (new_x, self.r.centery)
-                self.value = ((self.max_val - self.min_val) / 300) * self.r.centerx
+                self.r.centerx = new_x
+                self.value = self.min_val + (((self.max_val - self.min_val) / 200) * (self.r.centerx - 50))
 
             pygame.event.post(self.slider_event)
+
+    def update_position(self) -> None:
+        self.r.centerx = ((200 * (self.value - self.min_val)) // (self.max_val - self.min_val)) + 50
 
 
 class Button(ModifiedSprite):
@@ -471,16 +480,23 @@ class TabMenu(ModifiedSprite):
 
         super(TabMenu, self).__init__(tooltip)
 
-        self.tab_button = Button(
+        self.tab_add_button = Button(
             "+",
-            (0, 275, 50, 50),
+            (0, 275, 25, 50),
             self.create_tab,
-            WHITE,
+            (50, 50, 200),
+        )
+
+        self.tab_remove_button = Button(
+            "-",
+            (25, 275, 25, 50),
+            self.remove_tab,
+            (200, 50, 50),
         )
 
         tab: Tab
-        self.rect = self.tab_button.rect.unionall(
-            [tab.panel.rect for tab in tabs.sprites()]
+        self.rect = self.tab_add_button.rect.unionall(
+            [tab.panel.rect for tab in tabs.sprites()] + [self.tab_remove_button.rect]
         )
         self.image = Surface(self.rect.size)
 
@@ -500,7 +516,14 @@ class TabMenu(ModifiedSprite):
         if len(tabs) == 1:
             return
 
-        tabs.remove(tabs.sprites()[len(tabs.sprites()) - 1])
+        tab_to_remove = tabs.sprites()[len(tabs) - 1]
+        for slider in tab_to_remove.all_sliders:
+            all_sprites.remove(slider)
+            widget_group.remove(slider)
+        all_sprites.remove(tab_to_remove.panel, tab_to_remove)
+        widget_group.remove(tab_to_remove.panel)
+        tabs.remove(tab_to_remove)
+
         self.rect.width -= 50
         self.image = Surface(self.rect.size)
         pygame.event.post(self.tab_created_event)
@@ -518,10 +541,14 @@ class LoadMenu(ModifiedSprite):
 
         self.cursor = 0
 
-        self.next_button = Button("Next", (1240, 720, 60, 60), self.increment_cursor, (100, 200, 255))
+        self.next_button = Button(
+            "Next", (1240, 720, 60, 60), self.increment_cursor, (100, 200, 255)
+        )
         self.next_button.active = False
 
-        self.import_button = Button("Import", (1310, 720, 60, 60), self.import_configurations, (255, 200, 100))
+        self.import_button = Button(
+            "Import", (1310, 720, 60, 60), self.import_configurations, (255, 200, 100)
+        )
         self.import_button.active = False
 
     def increment_cursor(self):
@@ -536,7 +563,9 @@ class LoadMenu(ModifiedSprite):
             current_id = i + 1
             current_entry = []
             for table in db.tables:
-                current_entry.append(db.load_table(table).find_one(id=current_id))
+                current_values = db.load_table(table).find_one(id=current_id)
+                if current_values:
+                    current_entry.append(current_values)
             self.entries.append(current_entry)
 
     def import_configurations(self):
@@ -550,6 +579,7 @@ class LoadMenu(ModifiedSprite):
             current_tab = tabs.sprites()[index]
             for i, slider in enumerate(current_tab.all_sliders.sprites()):
                 slider.value = [j for j in entry.values()][i + 1]
+                slider.update_position()
         canvas.update_coords()
 
     def update(self, *args, **kwargs) -> None:
@@ -565,8 +595,12 @@ class LoadMenu(ModifiedSprite):
                 if key == "id":
                     continue
                 else:
-                    create_text(f"TAB {index + 1} {key}: {round(value, 3)}", WHITE, (0, 0),
-                                topleft=(1040, 220 + (20 * print_index)))
+                    create_text(
+                        f"TAB {index + 1} {key}: {round(value, 3)}",
+                        WHITE,
+                        (0, 0),
+                        topleft=(1040, 220 + (20 * print_index)),
+                    )
 
 
 def temp():
@@ -602,6 +636,7 @@ class Canvas(ModifiedSprite):
 
         self.last_point = ()
 
+        self.clear_next = False
         self.SUBS_CONSTS = [A, F, P, D]
         self.update_coords()
 
@@ -623,40 +658,13 @@ class Canvas(ModifiedSprite):
         self.y = sympy.lambdify(T, self.y_expr)
 
         if auto_clear_btn.toggled:
-            SCREEN.fill(BLACK)
+            self.clear_next = True
 
     def coords_at_time(self, t):
         p = point(self.x(t), self.y(t))
         return p
 
     def update(self, *args, **kwargs) -> None:
-
-        create_text(
-            f"x(t) = {pretty_print(str(round_expr(self.x_expr / 50)))}",
-            WHITE,
-            (SCREEN_WIDTH / 2, 160),
-        )
-        create_text(
-            f"y(t) = {pretty_print(str(round_expr(self.y_expr / 50)))}",
-            WHITE,
-            (SCREEN_WIDTH / 2, 185),
-        )
-
-        create_text(
-            f"Time (t) elapsed: {round(time)}", WHITE, (SCREEN_WIDTH / 2 + 500, 25)
-        )
-
-        create_text(
-            f"Speed: {speed}x",
-            WHITE,
-            (SCREEN_WIDTH / 2 + 500, 50),
-        )
-
-        pygame.gfxdraw.rectangle(
-            SCREEN,
-            (470, 200, 500, 500),
-            WHITE,
-        )
 
         curr_point = curr_x, curr_y = self.coords_at_time(time)
 
@@ -673,7 +681,7 @@ class Canvas(ModifiedSprite):
         step = 1
         points = [curr_point, next_values]
 
-        while point_distance > 1:
+        while point_distance > 0.5:
             next_stamp = speed / FPS / (2 ** step)
             general_point = self.coords_at_time(time + next_stamp)
 
@@ -694,6 +702,10 @@ class Canvas(ModifiedSprite):
         for p in points:
             p_x, p_y = to_pygame(p)
             pygame.gfxdraw.pixel(SCREEN, p_x, p_y, curve_colour)
+
+        if self.clear_next:
+            SCREEN.fill(BLACK, self.rect)
+            self.clear_next = False
 
 
 menu = TabMenu(tooltip="This is the panel for the sliders")
@@ -736,8 +748,9 @@ def reset_time():
 def choose_colour():
     global curve_colour
     temp_colour = colorchooser.askcolor(title="Colour")
-    curve_colour = tuple(map(math.floor, temp_colour[0]))
-    canvas.update_coords()
+    if temp_colour[0]:
+        curve_colour = tuple(map(math.floor, temp_colour[0]))
+        canvas.update_coords()
 
 
 def save():
@@ -766,7 +779,7 @@ def save():
 
 
 quit_btn = Button(
-    "Quit", (80, 10, 60, 60), pygame.quit, (255, 0, 0), tooltip="Click to exit"
+    "Quit", (80, 10, 60, 60), sys.exit, (255, 0, 0), tooltip="Click to exit"
 )
 
 pause_btn = ToggleButton(
@@ -851,15 +864,43 @@ while running:
     sprite: ModifiedSprite
     tab: Tab
 
-    SCREEN.fill(BLACK, (0, 0, 470, 900))
-    SCREEN.fill(BLACK, (970, 0, 470, 900))
-    SCREEN.fill(BLACK, (470, 0, 500, 200))
-    SCREEN.fill(BLACK, (470, 700, 500, 200))
+    SCREEN.fill(BLACK, (0, 0, 469, 900))
+    SCREEN.fill(BLACK, (971, 0, 469, 900))
+    SCREEN.fill(BLACK, (469, 0, 502, 199))
+    SCREEN.fill(BLACK, (469, 701, 502, 199))
+
+    create_text(
+        f"x(t) = {pretty_print(str(round_expr(canvas.x_expr / 50)))}",
+        WHITE,
+        (SCREEN_WIDTH / 2, 160),
+    )
+    create_text(
+        f"y(t) = {pretty_print(str(round_expr(canvas.y_expr / 50)))}",
+        WHITE,
+        (SCREEN_WIDTH / 2, 185),
+    )
+
+    create_text(
+        f"Time (t) elapsed: {round(time)}", WHITE, (SCREEN_WIDTH / 2 + 500, 25)
+    )
+
+    create_text(
+        f"Speed: {speed}x",
+        WHITE,
+        (SCREEN_WIDTH / 2 + 500, 50),
+    )
+
+    pygame.gfxdraw.rectangle(
+        SCREEN,
+        (469, 199, 502, 502),
+        WHITE,
+    )
 
     mouse_pos = pygame.mouse.get_pos()
 
     menu.active = menu_btn.toggled
-    menu.tab_button.active = menu_btn.toggled
+    menu.tab_add_button.active = menu_btn.toggled
+    menu.tab_remove_button.active = menu_btn.toggled
     for tab in tabs.sprites():
         tab.panel.active = menu_btn.toggled
 
@@ -889,13 +930,37 @@ while running:
 
     tabs.update()
 
-    for sprite in all_sprites.sprites():
-        if (
-                sprite.rect.collidepoint(mouse_pos)
-                and sprite.active
-                and not tooltip_button.toggled
-        ):
-            sprite.show_tooltip(mouse_pos)
+    if not tooltip_button.toggled:
+        create_text(
+            "Welcome to the harmonograph simulator!",
+            WHITE,
+            (720, 720)
+        )
+
+        create_text(
+            "To get started click the Menu button and start dragging around the sliders.",
+            WHITE,
+            (0, 0),
+            topleft=(470, 740),
+        )
+
+        create_text(
+            "Opening a new tab adds more pendulums to the system.",
+            WHITE,
+            (0, 0),
+            topleft=(470, 760),
+        )
+
+        create_text(
+            "For more information on what something does, hover over it.",
+            WHITE,
+            (0, 0),
+            topleft=(470, 780),
+        )
+
+        for sprite in all_sprites.sprites():
+            if sprite.rect.collidepoint(mouse_pos) and sprite.active:
+                sprite.show_tooltip(mouse_pos)
 
     if not pause_btn.toggled:
         time += speed / FPS
